@@ -1,0 +1,33 @@
+{
+  "raw": [
+    "arw",
+    "cr2",
+    "cr3",
+    "dng",
+    "erf",
+    "kdc",
+    "mrw",
+    "nef",
+    "nrw",
+    "orf",
+    "pef",
+    "raf",
+    "raw",
+    "rw2",
+    "sr2",
+    "srf",
+    "x3f"
+  ],
+  "img": [
+    "jpg",
+    "jpeg",
+    "png",
+    "gif",
+    "bmp",
+    "tiff",
+    "tif",
+    "heif",
+    "heic",
+    "webp"
+  ]
+}
