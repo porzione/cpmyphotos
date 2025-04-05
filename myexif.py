@@ -6,7 +6,7 @@ import os
 import json
 import re
 import subprocess
-#from pprint import pprint
+# from pprint import pprint
 import xmltodict
 
 EXTENSIONS = ['JPG', 'RW2', 'ORF']
@@ -36,7 +36,7 @@ EXIF_KEYS = [
     'IFD0:Make',
     'IFD0:Model',
     'IFD0:ModifyDate',
-    'IFD0:Orientation', # IFD1:Orientation Panasonic:CameraOrientation
+#   'IFD0:Orientation', # IFD1:Orientation Panasonic:CameraOrientation
 ]
 
 def find_source_image(filename):
@@ -60,7 +60,9 @@ def find_source_image(filename):
     sys.exit(1)
 
 def read_metadata(image_path):
-    cmd = ['exiftool', '-e', '-X', image_path]
+    # -e (--composite) Do not generate composite tags
+    # -X (-xmlFormat)  Use RDF/XML output format
+    cmd = ['exiftool', '-X', image_path]
     with subprocess.Popen(cmd, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         stdout, stderr = proc.communicate()
@@ -71,12 +73,16 @@ def read_metadata(image_path):
     return xmltodict.parse(stdout)['rdf:RDF']['rdf:Description']
 
 def edit_metadata(old_metadata):
+    # pprint(old_metadata);
     metadata = {}
     for key in EXIF_KEYS:
         if key in old_metadata:
             metadata[key] = old_metadata[key]
+    # <Composite:LensType>Leica DG Summilux 25mm F1.4 Asph.</Composite:LensType>
+    # <Composite:LensID>Leica DG Summilux 25mm F1.4 Asph.</Composite:LensID>
     if 'LensModel' not in metadata:
-        for lens in ['LensType', 'LensID', 'Panasonic:LensType', 'ExifIFD:LensModel']:
+        for lens in ['LensType', 'LensID', 'Panasonic:LensType', 'ExifIFD:LensModel'
+                     'Composite:LensType', 'Composite:LensID']:
             if lens in old_metadata and old_metadata[lens]:
                 metadata['LensModel'] = old_metadata[lens]
                 print(f'lens found in {lens}: {old_metadata[lens]}')
