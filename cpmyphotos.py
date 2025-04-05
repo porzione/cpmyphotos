@@ -81,8 +81,12 @@ if not os.path.exists(args.srcdir):
 if not os.path.exists(args.dstdir):
     raise ValueError(f"Destination dir '{args.dstdir}' doesn't exist")
 
+# pylint: disable=invalid-name
+parsed_date = None
 if args.newer:
-    newer_time = dateparser.parse(args.newer).timestamp()
+    parsed_date = dateparser.parse(args.newer)
+    if parsed_date is None:
+        raise ValueError(f"Invalid date format for --neewer: '{args.newer}'.")
 
 TOTAL_TIME = 0.0
 out_files = []
@@ -94,7 +98,7 @@ for filename in os.listdir(args.srcdir):
             print(f'not an image: {filename}')
             continue
         mod_time = os.path.getmtime(src_file)
-        if args.newer and mod_time < newer_time:
+        if args.newer and parsed_date and mod_time < parsed_date.timestamp():
             print(f'old: {filename} {mod_time}')
             continue
         dst_file = os.path.join(args.dstdir, filename)
@@ -104,6 +108,7 @@ for filename in os.listdir(args.srcdir):
             if src_size == dst_size:
                 continue
             print(f"size differs: {src_size} {dst_size}")
+            continue
         print(f"COPY {src_file} {dst_file}", end="")
         start_time = timer()
         shutil.copy2(src_file, dst_file)
