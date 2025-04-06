@@ -40,21 +40,43 @@ EXIF_KEYS = [
 ]
 
 def find_source_image(filename):
+    """
+    Find the original source image in the grandparent directory.
+    For example, if the target is: /path/to/photos/darktable_exported/image_pp.jpg
+    Look for source in: /path/to/photos/image.{JPG,RW2,ORF}
+    """
     parent_directory = os.path.dirname(os.path.dirname(os.path.abspath(filename)))
     print(f'parent directory: {parent_directory}')
     base_name = os.path.splitext(os.path.basename(os.path.abspath(filename)))[0]
-    test_name = re.sub(r'(?<!^)_\w+', '', base_name)
+    test_name = re.sub(r'(?<!^)_\w+', '', base_name)  # Remove processing suffixes
     print(f'test_name: {test_name}')
 
+    # First try exact filenames with supported extensions
     for ext in EXTENSIONS:
         potential_file = os.path.join(parent_directory, f'{test_name}.{ext}')
         if os.path.exists(potential_file):
             print(f'found: {potential_file}')
             return potential_file
-        potential_files = [f for f in os.listdir(parent_directory)
-                           if f.lower() == os.path.basename(potential_file).lower()]
-        if potential_files:
-            return os.path.join(parent_directory, potential_files[0])
+
+        # Try case-insensitive matching
+        potential_basename = f'{test_name}.{ext.lower()}'
+        for actual_file in os.listdir(parent_directory):
+            if actual_file.lower() == potential_basename.lower():
+                found_path = os.path.join(parent_directory, actual_file)
+                print(f'found (case-insensitive): {found_path}')
+                return found_path
+
+    # If we're still here, try a more flexible approach
+    for actual_file in os.listdir(parent_directory):
+        file_base, file_ext = os.path.splitext(actual_file)
+        # Remove the dot from extension
+        file_ext = file_ext[1:] if file_ext else ""
+
+        if (file_base.lower() == test_name.lower() and
+            file_ext.upper() in [ext.upper() for ext in EXTENSIONS]):
+            found_path = os.path.join(parent_directory, actual_file)
+            print(f'found (flexible match): {found_path}')
+            return found_path
 
     print(f'none found for {filename}')
     sys.exit(1)
@@ -67,7 +89,7 @@ def read_metadata(image_path):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         stdout, stderr = proc.communicate()
         if proc.returncode != 0:
-            print(f'Error reading metadata: {stderr.decode()}:{stdout.decode}')
+            print(f'Error reading metadata: {stderr.decode()}:{stdout.decode()}')
             sys.exit(1)
 
     return xmltodict.parse(stdout)['rdf:RDF']['rdf:Description']
@@ -81,7 +103,7 @@ def edit_metadata(old_metadata):
     # <Composite:LensType>Leica DG Summilux 25mm F1.4 Asph.</Composite:LensType>
     # <Composite:LensID>Leica DG Summilux 25mm F1.4 Asph.</Composite:LensID>
     if 'LensModel' not in metadata:
-        for lens in ['LensType', 'LensID', 'Panasonic:LensType', 'ExifIFD:LensModel'
+        for lens in ['LensType', 'LensID', 'Panasonic:LensType', 'ExifIFD:LensModel',
                      'Composite:LensType', 'Composite:LensID']:
             if lens in old_metadata and old_metadata[lens]:
                 metadata['LensModel'] = old_metadata[lens]
