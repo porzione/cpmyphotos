@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1"
+     creator="cpmyphotos test fixture"
+     xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <time>2026-04-12T05:23:09Z</time>
+  </metadata>
+  <trk>
+    <name>Synthetic UTC interpolation track</name>
+    <trkseg>
+      <trkpt lat="10.000000" lon="20.000000">
+        <ele>100</ele>
+        <time>2026-04-12T05:23:09Z</time>
+      </trkpt>
+      <trkpt lat="12.000000" lon="22.000000">
+        <ele>200</ele>
+        <time>2026-04-12T05:24:09Z</time>
+      </trkpt>
+      <trkpt lat="14.000000" lon="24.000000">
+        <ele>300</ele>
+        <time>2026-04-12T05:24:39Z</time>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>
+
