@@ -37,7 +37,9 @@ ln -s "$PWD/cpmyphotos.py" ~/bin/cpmyphotos
 ## Configuration
 
 Copy [`cpmyphotos.example.yaml`](cpmyphotos.example.yaml) to `~/.config/cpmyphotos.yaml`
-(`$XDG_CONFIG_HOME`). All keys are optional and command-line options override them:
+(`$XDG_CONFIG_HOME`), or pass `--config FILE`. The keys are `copyright`, `lens`, `tz`,
+`card_root`, `archive`, `gpx_dir` and `gpx_name`, all optional; an unknown key is an error.
+Command-line options override them, and `-C ''` / `-L ''` turn the config's tag off:
 
 ```yaml
 copyright: MYNAME
@@ -48,8 +50,10 @@ gpx_dir: ~/SyncPhone/gpslog
 With it, the everyday import is:
 
 ```sh
-cpmyphotos -N Cyprus   # dry run: show the card, dates, destination and tracks
+cpmyphotos -N Cyprus               # dry run: show the card, dates, destination and tracks
 cpmyphotos Cyprus
+cpmyphotos Cyprus --all            # first import from a new or reformatted card
+cpmyphotos Cyprus -n '3 days ago'  # an explicit date instead of the last import
 ```
 
 - **Card.** Without `-s`, the single mounted dir under `card_root` (default
@@ -58,14 +62,21 @@ cpmyphotos Cyprus
   destination. `-s CARD_ROOT` does the same for a chosen card; `-s` on any other dir copies
   that dir, and `-r` copies a tree as it is.
 - **Since the last import.** For a card, only files newer than the newest file imported from
-  it last time are taken. This is remembered per card mount name in
-  `~/.local/state/cpmyphotos/cards.json` and updated only after a run without conflicts or
-  failures. The first import from a card needs `--all` (or `-n DATE`).
+  it last time are taken. This is remembered per card mount name (the volume label, or a FAT
+  serial such as `4621-0000`) in `~/.local/state/cpmyphotos/cards.json` (`$XDG_STATE_HOME`),
+  and updated only after a run without conflicts or failures, never backwards. The first
+  import from a card needs `--all` (or `-n DATE`), so an old card is never dumped into the
+  current trip by accident. A card reformatted in the camera may get a new serial and then
+  counts as new.
+- **Old dates.** Card files with mtimes over a year old stop the run before anything else,
+  even with `-N`, because they usually mean a camera clock reset; see the last example.
 - **Destination.** `{place}` is the command's argument and `{year}` the year of each photo, so a
   trip over New Year is split correctly. The part before `{year}` must exist. `-d` still
   works and may use the same placeholders.
 - **GPX.** With `gpx_dir`, the tracks named `gpx_name` (default `%Y%m%d.gpx`) for each photo
-  date and a day either side are used, together with any `-g`. `--no-gps` turns it off.
+  date and a day either side are used, together with any `-g`: the photo date comes from its
+  mtime, while GPS loggers such as GPSLogger name tracks by local date. Photo dates without a
+  track nearby give one `WARNING`. `--no-gps` turns it off.
 
 ## Usage
 
@@ -97,8 +108,13 @@ cpmyphotos [PLACE] [-s SRCDIR] [-d DSTDIR] [-N] [-r] [-n DATE | --all] [--allow-
 | `--config FILE` | config file instead of `~/.config/cpmyphotos.yaml` |
 | `-D` | show skipped files and ExifTool commands |
 
-It first prints the resolved `SOURCE`, `NEWER`, `DEST`, `GPX` and `EXIF`, then `COPY`, `CONFLICT`, `WARNING` and `ERROR` lines and a final
-`SUMMARY: scanned= copied= identical= conflicts= unsupported= old= failed= metadata_changed= time=`.
+It first prints the resolved `SOURCE`, `NEWER`, `DEST` (per directory, with counts), `GPX`
+and `EXIF`, then `COPY`, `SKIP ...` (with `-D`), `CONFLICT`, `WARNING` and `ERROR` lines and a
+final
+`SUMMARY: scanned= copied= identical= conflicts= unsupported= old= failed= metadata_changed= time=`,
+where `unsupported` counts files with extensions not in `ext.json`. After a card import it
+prints `IMPORTED: CARD up to ...`. With `-N` it lists `NEW:` files and a `DRY-RUN:` count
+line instead of copying.
 The exit code is 1 if there were conflicts or failures, 2 for usage errors (bad arguments,
 missing directories, not enough space).
 
@@ -117,6 +133,12 @@ Whole card with its `DCIM/...` layout, several tracks, camera clock 25 seconds b
 ```sh
 cpmyphotos -r -s /run/media/${USER}/LUMIX1 -d ~/import \
   -g day1.gpx -g day2.gpx --geosync +00:00:25
+```
+
+The same with the camera clock at +04:00, and a photo without a track match is an error:
+
+```sh
+cpmyphotos -r -s /run/media/${USER}/LUMIX1 -d ~/import -g day1.gpx --tz +04:00 --require-gps
 ```
 
 Refuse to run if the card or the archive disk is not mounted, so nothing lands on `/`:
@@ -151,3 +173,10 @@ uv run --with pytest --with dateparser --with pyyaml pytest -q
 
 `tests/test_real_gpx.py` is an opt-in smoke test against your newest real track:
 `REAL_GPX_DIR=~/path/to/gpslogger uv run --with pytest --with dateparser --with pyyaml pytest -q -m real_gpx`.
+
+CI also runs pylint with the repository's `.pylintrc`:
+
+```sh
+uv run --with pylint --with pytest --with dateparser --with pyyaml \
+  pylint --rcfile .pylintrc cpmyphotos.py tests/*.py
+```
