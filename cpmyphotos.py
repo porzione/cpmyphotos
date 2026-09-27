@@ -40,6 +40,40 @@ CONFIG_KEYS = {"copyright", "lens", "tz", "card_root", "archive", "gpx_dir", "gp
 DEFAULT_GPX_NAME = "%Y%m%d.gpx"
 
 
+@dataclass(frozen=True)
+class Layout:
+    """Where files come from and where they go."""
+
+    srcdir: Path
+    folders: list[Path]  # scanned dirs: a card's DCIM folders, else [srcdir]
+    card: Path | None
+    recursive: bool
+    template: str  # destination with {place} substituted; {year} is per file
+    root: Path  # the fixed part of the template, before {year}
+
+
+@dataclass(frozen=True)
+class Metadata:
+    """Metadata written into the copies; none of it means byte-exact copies."""
+
+    copyright: str | None
+    lens: str | None
+    gpx: list[Path]
+    camera_tz: str
+    geosync: str | None
+    require_gps: bool
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Resolved options for one run; argparse's namespace stays the raw input."""
+
+    layout: Layout
+    metadata: Metadata
+    mode: int | None  # None preserves the source mode
+    debug: bool
+
+
 @dataclass
 class PendingMetadataCopy:
     """A copy held under a temporary name until metadata work succeeds."""
@@ -52,17 +86,6 @@ class PendingMetadataCopy:
 
 
 @dataclass
-class ImportState:
-    """Shared state for one import run."""
-
-    args: argparse.Namespace
-    extensions: set[str]
-    newer_ns: int | None
-    pending: list[PendingMetadataCopy]
-    counters: dict[str, int]
-
-
-@dataclass
 class Plan:
     """Everything resolved before the first write."""
 
@@ -72,6 +95,16 @@ class Plan:
     newer_ns: int | None
     newer_reason: str
     newest_ns: int | None
+
+
+@dataclass
+class ImportState:
+    """Shared state for one import run."""
+
+    settings: Settings
+    plan: Plan
+    pending: list[PendingMetadataCopy]
+    counters: dict[str, int]
 
 
 def parse_mode(value: str) -> int:
@@ -193,14 +226,14 @@ def load_config(path: Path | None) -> dict[str, str]:
     return {key: str(value) for key, value in config.items() if value is not None}
 
 
-def apply_config_defaults(args: argparse.Namespace, config: dict[str, str]) -> None:
-    """Fill options not given on the command line from the config."""
-    if args.exif_copr is None:
-        args.exif_copr = config.get("copyright")
-    if args.exif_lens is None:
-        args.exif_lens = config.get("lens")
-    if args.camera_tz is None:
-        args.camera_tz = config.get("tz", "Z")
+def option(value: str | None, default: str | None) -> str | None:
+    """Return a command-line value, or the config default when it was not given."""
+    return default if value is None else value
+
+
+def file_extension(path: Path) -> str:
+    """Return a file's extension, lowercase and without the dot."""
+    return path.suffix[1:].lower()
 
 
 def is_mount(path: Path) -> bool:
@@ -243,19 +276,18 @@ def card_folders(card: Path) -> list[Path]:
                   key=lambda path: path.name.lower())
 
 
-def resolve_source(args: argparse.Namespace, config: dict[str, str]) -> None:
-    """Choose and validate the source; a card root without -r means its DCIM folders."""
-    if args.srcdir is None:
-        args.srcdir = find_card(config)
-        args.require_src_mount = True
-    if not args.srcdir.is_dir():
-        raise ValueError(f"source directory does not exist or is not a directory: {args.srcdir}")
-    if not os.access(args.srcdir, os.R_OK | os.X_OK):
-        raise ValueError(f"source directory is not readable: {args.srcdir}")
-    if args.require_src_mount and not is_mount(args.srcdir):
-        raise ValueError(f"source is not a mount point: {args.srcdir}")
-    args.card = args.srcdir if not args.recursive and is_card(args.srcdir) else None
-    args.srcdirs = card_folders(args.card) if args.card else [args.srcdir]
+def resolve_source(args: argparse.Namespace, config: dict[str, str]) -> Path:
+    """Choose and validate the source directory; a detected card must be a mount point."""
+    srcdir, require_mount = args.srcdir, args.require_src_mount
+    if srcdir is None:
+        srcdir, require_mount = find_card(config), True
+    if not srcdir.is_dir():
+        raise ValueError(f"source directory does not exist or is not a directory: {srcdir}")
+    if not os.access(srcdir, os.R_OK | os.X_OK):
+        raise ValueError(f"source directory is not readable: {srcdir}")
+    if require_mount and not is_mount(srcdir):
+        raise ValueError(f"source is not a mount point: {srcdir}")
+    return srcdir
 
 
 def static_prefix(template: str) -> Path:
@@ -268,7 +300,7 @@ def static_prefix(template: str) -> Path:
     return Path(*parts) if parts else Path(".")
 
 
-def resolve_destination(args: argparse.Namespace, config: dict[str, str]) -> None:
+def resolve_destination(args: argparse.Namespace, config: dict[str, str]) -> str:
     """Build the destination template, substituting {place}; {year} is per file."""
     if args.dstdir is not None:
         template = str(args.dstdir)
@@ -286,19 +318,27 @@ def resolve_destination(args: argparse.Namespace, config: dict[str, str]) -> Non
     elif args.place:
         raise ValueError(f"place {args.place!r} given, but the destination has no {{place}}: "
                          f"{template}")
-    args.dst_template = template
-    args.dst_root = static_prefix(template)
+    return template
 
 
-def validate_destination(args: argparse.Namespace) -> None:
+def resolve_layout(args: argparse.Namespace, config: dict[str, str]) -> Layout:
+    """Resolve source and destination; a card root without -r means its DCIM folders."""
+    srcdir = resolve_source(args, config)
+    template = resolve_destination(args, config)
+    card = srcdir if not args.recursive and is_card(srcdir) else None
+    return Layout(srcdir, card_folders(card) if card else [srcdir], card, args.recursive,
+                  template, static_prefix(template))
+
+
+def validate_destination(layout: Layout, require_mount: bool) -> None:
     """Validate the fixed part of the destination before writing anything."""
-    if not args.dst_root.is_dir():
+    if not layout.root.is_dir():
         raise ValueError(
-            f"destination directory does not exist or is not a directory: {args.dst_root}"
+            f"destination directory does not exist or is not a directory: {layout.root}"
         )
-    if args.require_dst_mount and not is_mount(args.dst_root):
-        raise ValueError(f"destination is not a mount point: {args.dst_root}")
-    if args.recursive and args.dst_root.resolve().is_relative_to(args.srcdir.resolve()):
+    if require_mount and not is_mount(layout.root):
+        raise ValueError(f"destination is not a mount point: {layout.root}")
+    if layout.recursive and layout.root.resolve().is_relative_to(layout.srcdir.resolve()):
         raise ValueError("destination cannot be inside source when --recursive is used")
 
 
@@ -361,44 +401,42 @@ def save_card_state(card: Path, newest_ns: int) -> None:
     temporary.replace(path)
 
 
-def resolve_newer(args: argparse.Namespace) -> tuple[int | None, str]:
+def resolve_newer(args: argparse.Namespace, card: Path | None) -> tuple[int | None, str]:
     """Return the mtime threshold in nanoseconds and where it came from."""
     if args.newer is not None:
         parsed = dateparser.parse(args.newer)
         if parsed is None:
             raise ValueError(f"invalid date for --newer: {args.newer!r}")
         return datetime_ns(parsed), f"-n {args.newer}"
-    if args.all or args.card is None:
+    if args.all or card is None:
         return None, ""
-    entry = load_state().get(args.card.name)
+    entry = load_state().get(card.name)
     if entry is None:
         raise ValueError(
-            f"no import from card {args.card.name} recorded yet: "
+            f"no import from card {card.name} recorded yet: "
             "pass -n DATE, or --all for the whole card"
         )
-    return int(entry["mtime_ns"]), f"last import from {args.card.name}"
+    return int(entry["mtime_ns"]), f"last import from {card.name}"
 
 
-def source_files(args: argparse.Namespace) -> list[Path]:
+def source_files(layout: Layout) -> list[Path]:
     """Return source files in deterministic order."""
-    if args.recursive:
-        paths = args.srcdir.rglob("*")
+    if layout.recursive:
+        paths = layout.srcdir.rglob("*")
     else:
-        paths = chain.from_iterable(directory.iterdir() for directory in args.srcdirs)
+        paths = chain.from_iterable(directory.iterdir() for directory in layout.folders)
     return sorted((path for path in paths if path.is_file()), key=lambda path: str(path).lower())
 
 
 def is_selected(source: Path, extensions: set[str], newer_ns: int | None) -> bool:
     """Return whether a file has an accepted extension and passes the date filter."""
-    if source.suffix[1:].lower() not in extensions:
+    if file_extension(source) not in extensions:
         return False
     return newer_ns is None or source.stat().st_mtime_ns > newer_ns
 
 
-def validate_photo_dates(sources: list[Path], args: argparse.Namespace) -> None:
+def validate_photo_dates(sources: list[Path]) -> None:
     """Catch implausibly old card timestamps before they drive the import."""
-    if not args.card or args.allow_old_dates:
-        return
     cutoff_ns = time.time_ns() - 365 * 24 * 60 * 60 * 1_000_000_000
     old = [source for source in sources if source.stat().st_mtime_ns < cutoff_ns]
     if old:
@@ -414,21 +452,22 @@ def file_date(path: Path) -> date:
     return local_time(path.stat().st_mtime).date()
 
 
-def destination_for(source_file: Path, args: argparse.Namespace) -> Path:
+def destination_for(source_file: Path, layout: Layout) -> Path:
     """Calculate a destination, preserving relative paths when recursive."""
-    base = args.dst_template
+    base = layout.template
     if "{year}" in base:
         base = base.replace("{year}", str(file_date(source_file).year))
-    relative = source_file.relative_to(args.srcdir) if args.recursive else Path(source_file.name)
+    relative = (source_file.relative_to(layout.srcdir) if layout.recursive
+                else Path(source_file.name))
     return Path(base) / relative
 
 
-def resolve_gpx(args: argparse.Namespace, config: dict[str, str], dates: set[date]) -> None:
-    """Add the tracks from 'gpx_dir' for the photo dates, a day either side."""
+def resolve_gpx(args: argparse.Namespace, config: dict[str, str], dates: set[date]
+                ) -> list[Path]:
+    """Return -g tracks plus those from 'gpx_dir' for the photo dates, a day either side."""
     explicit = list(args.gpx or [])
     if args.no_gps or "gpx_dir" not in config:
-        args.gpx = explicit
-        return
+        return explicit
     gpx_dir = Path(config["gpx_dir"]).expanduser()
     name = config.get("gpx_name", DEFAULT_GPX_NAME)
     found: dict[Path, None] = {}
@@ -442,22 +481,34 @@ def resolve_gpx(args: argparse.Namespace, config: dict[str, str], dates: set[dat
     if uncovered:
         print(f"WARNING: no GPX track in {gpx_dir} for photo dates: " + ", ".join(uncovered),
               file=sys.stderr)
-    args.gpx = list(dict.fromkeys([*explicit, *found]))
-    if args.require_gps and not args.gpx and dates:
+    gpx = list(dict.fromkeys([*explicit, *found]))
+    if args.require_gps and not gpx and dates:
         raise ValueError("--require-gps is set, but no GPX track was found")
+    return gpx
 
 
-def validate_metadata_options(args: argparse.Namespace) -> None:
-    """Validate metadata arguments and required programs."""
-    if args.camera_tz and not TIMEZONE_RE.fullmatch(args.camera_tz):
+def resolve_metadata(args: argparse.Namespace, config: dict[str, str], dates: set[date]
+                     ) -> Metadata:
+    """Resolve and validate metadata options, including required programs."""
+    metadata = Metadata(
+        copyright=option(args.exif_copr, config.get("copyright")),
+        lens=option(args.exif_lens, config.get("lens")),
+        gpx=resolve_gpx(args, config, dates),
+        camera_tz=option(args.camera_tz, config.get("tz", "Z")),
+        geosync=args.geosync,
+        require_gps=args.require_gps,
+    )
+    if metadata.camera_tz and not TIMEZONE_RE.fullmatch(metadata.camera_tz):
         raise ValueError("--camera-tz must be Z or an offset such as +03:00")
-    if args.geosync and not args.gpx:
+    if metadata.geosync and not metadata.gpx:
         raise ValueError("--geosync requires at least one GPX track")
-    for gpx_file in args.gpx or []:
+    for gpx_file in metadata.gpx:
         if not gpx_file.is_file():
             raise ValueError(f"GPX file does not exist or is not a file: {gpx_file}")
-    if (args.gpx or args.exif_copr or args.exif_lens) and shutil.which("exiftool") is None:
+    if ((metadata.gpx or metadata.copyright or metadata.lens)
+            and shutil.which("exiftool") is None):
         raise ValueError("exiftool is required for the requested metadata changes")
+    return metadata
 
 
 def file_hash(path: Path) -> str:
@@ -469,16 +520,28 @@ def file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def metadata_requested(extension: str, args: argparse.Namespace) -> tuple[bool, bool]:
+def metadata_requested(extension: str, metadata: Metadata) -> tuple[bool, bool]:
     """Return (any metadata work, basic EXIF work) for a file."""
-    basic_exif = extension in METADATA_EXTENSIONS and bool(args.exif_copr or args.exif_lens)
-    return bool(args.gpx) or basic_exif, basic_exif
+    basic_exif = extension in METADATA_EXTENSIONS and bool(metadata.copyright or metadata.lens)
+    return bool(metadata.gpx) or basic_exif, basic_exif
 
 
-def apply_mode(path: Path, args: argparse.Namespace) -> None:
-    """Apply the configured destination mode."""
-    if not args.preserve_mode:
-        path.chmod(args.mode)
+def apply_mode(path: Path, mode: int | None) -> None:
+    """Apply the destination mode, unless the source mode is preserved."""
+    if mode is not None:
+        path.chmod(mode)
+
+
+def verify_copy(source: Path, copy: Path, source_stat: os.stat_result) -> str:
+    """Check the copy against its source and that the source did not change; return its hash."""
+    source_digest = file_hash(source)
+    if source_digest != file_hash(copy):
+        raise OSError(f"verification failed while copying {source}")
+    current_stat = source.stat()
+    if (current_stat.st_size, current_stat.st_mtime_ns) != (
+            source_stat.st_size, source_stat.st_mtime_ns):
+        raise OSError(f"source changed while copying: {source}")
+    return source_digest
 
 
 def create_temporary_copy(source: Path, destination: Path) -> tuple[Path, str]:
@@ -492,20 +555,13 @@ def create_temporary_copy(source: Path, destination: Path) -> tuple[Path, str]:
     temporary = Path(temp_name)
     try:
         shutil.copy2(source, temporary)
-        source_digest = file_hash(source)
-        if source_digest != file_hash(temporary):
-            raise OSError(f"verification failed while copying {source}")
-        current_stat = source.stat()
-        if (current_stat.st_size, current_stat.st_mtime_ns) != (
-                source_stat.st_size, source_stat.st_mtime_ns):
-            raise OSError(f"source changed while copying: {source}")
-        return temporary, source_digest
+        return temporary, verify_copy(source, temporary, source_stat)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
 
 
-def direct_copy(source: Path, destination: Path, args: argparse.Namespace) -> None:
+def direct_copy(source: Path, destination: Path, mode: int | None) -> None:
     """Copy directly to a new destination and verify its content."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_stat = source.stat()
@@ -517,13 +573,8 @@ def direct_copy(source: Path, destination: Path, args: argparse.Namespace) -> No
                 destination_created = True
                 shutil.copyfileobj(source_handle, destination_handle, HASH_CHUNK_SIZE)
         shutil.copystat(source, destination)
-        apply_mode(destination, args)
-        if file_hash(source) != file_hash(destination):
-            raise OSError(f"verification failed while copying {source}")
-        current_stat = source.stat()
-        if (current_stat.st_size, current_stat.st_mtime_ns) != (
-                source_stat.st_size, source_stat.st_mtime_ns):
-            raise OSError(f"source changed while copying: {source}")
+        apply_mode(destination, mode)
+        verify_copy(source, destination, source_stat)
     except BaseException:
         if destination_created:
             destination.unlink(missing_ok=True)
@@ -572,37 +623,38 @@ def run_exiftool_batch(command: list[str], items: list[PendingMetadataCopy],
     return failed
 
 
-def basic_exif_command(args: argparse.Namespace) -> list[str]:
+def basic_exif_command(metadata: Metadata) -> list[str]:
     """Build the ExifTool command for copyright and lens tags, without file names."""
     command = ["exiftool", "-overwrite_original_in_place", "-P"]
-    if args.exif_copr:
-        command.append(f"-EXIF:Copyright={args.exif_copr}")
-    if args.exif_lens:
-        command.append(f"-EXIF:LensModel={args.exif_lens}")
+    if metadata.copyright:
+        command.append(f"-EXIF:Copyright={metadata.copyright}")
+    if metadata.lens:
+        command.append(f"-EXIF:LensModel={metadata.lens}")
     return command
 
 
-def geotag_command(args: argparse.Namespace) -> list[str]:
+def geotag_command(metadata: Metadata, debug: bool) -> list[str]:
     """Build the ExifTool geotagging command, without file names."""
     command = ["exiftool"]
-    for gpx_file in args.gpx:
+    for gpx_file in metadata.gpx:
         command.extend(["-geotag", str(gpx_file)])
-    if args.camera_tz:
-        command.append(f"-geotime<${{DateTimeOriginal}}{args.camera_tz}")
-    if args.geosync:
-        command.append(f"-geosync={args.geosync}")
+    if metadata.camera_tz:
+        command.append(f"-geotime<${{DateTimeOriginal}}{metadata.camera_tz}")
+    if metadata.geosync:
+        command.append(f"-geosync={metadata.geosync}")
     command.extend(["-overwrite_original_in_place", "-P"])
-    if args.debug:
+    if debug:
         command.append("-v2")
     return command
 
 
-def process_metadata(pending: list[PendingMetadataCopy], args: argparse.Namespace
+def process_metadata(pending: list[PendingMetadataCopy], settings: Settings
                      ) -> tuple[list[PendingMetadataCopy], list[tuple[PendingMetadataCopy, str]]]:
     """Apply requested EXIF and GPX metadata to temporary copies.
 
     Returns the copies ready to publish and the (copy, reason) pairs that failed.
     """
+    metadata, debug = settings.metadata, settings.debug
     ready = list(pending)
     failures: list[tuple[PendingMetadataCopy, str]] = []
 
@@ -612,20 +664,20 @@ def process_metadata(pending: list[PendingMetadataCopy], args: argparse.Namespac
 
     basic_items = [item for item in ready if item.write_basic_exif]
     if basic_items:
-        fail(run_exiftool_batch(basic_exif_command(args), basic_items, args.debug),
+        fail(run_exiftool_batch(basic_exif_command(metadata), basic_items, debug),
              "ExifTool could not write EXIF")
 
-    if args.gpx and ready:
-        fail(run_exiftool_batch(geotag_command(args), ready, args.debug),
+    if metadata.gpx and ready:
+        fail(run_exiftool_batch(geotag_command(metadata, debug), ready, debug),
              "ExifTool could not geotag")
 
-    if args.gpx and ready:
+    if metadata.gpx and ready:
         missing = set(files_missing_gps([str(item.temporary) for item in ready]))
         unmatched = [item for item in ready if str(item.temporary) in missing]
         if unmatched:
             sources = [str(item.source) for item in unmatched]
             print("WARNING: no GPX track match for: " + ", ".join(sources), file=sys.stderr)
-            if args.require_gps:
+            if metadata.require_gps:
                 fail(unmatched, "GPS coordinates required but no track match was found")
 
     # Metadata tools may update timestamps or permissions. Restore the source
@@ -633,13 +685,13 @@ def process_metadata(pending: list[PendingMetadataCopy], args: argparse.Namespac
     for item in list(ready):
         try:
             shutil.copystat(item.source, item.temporary)
-            apply_mode(item.temporary, args)
+            apply_mode(item.temporary, settings.mode)
         except OSError as error:
             fail([item], str(error))
     return ready, failures
 
 
-def publish_temporary(temporary: Path, destination: Path, args: argparse.Namespace) -> None:
+def publish_temporary(temporary: Path, destination: Path, mode: int | None) -> None:
     """Publish a temporary file without overwriting an existing one.
 
     A hard link publishes atomically. Filesystems without hard links (exFAT,
@@ -650,16 +702,16 @@ def publish_temporary(temporary: Path, destination: Path, args: argparse.Namespa
     except OSError as error:
         if error.errno not in LINK_UNSUPPORTED_ERRNOS:
             raise
-        direct_copy(temporary, destination, args)
+        direct_copy(temporary, destination, mode)
     temporary.unlink()
 
 
-def preflight_space(targets: list[tuple[Path, Path]], args: argparse.Namespace) -> None:
+def preflight_space(targets: list[tuple[Path, Path]], settings: Settings) -> None:
     """Ensure there is reasonable space for planned new and temporary copies."""
     permanent_bytes = 0
     existing_metadata_sizes = []
     for source, destination in targets:
-        needs_metadata, _ = metadata_requested(source.suffix[1:].lower(), args)
+        needs_metadata, _ = metadata_requested(file_extension(source), settings.metadata)
         if not destination.exists():
             permanent_bytes += source.stat().st_size
         elif needs_metadata:
@@ -669,7 +721,7 @@ def preflight_space(targets: list[tuple[Path, Path]], args: argparse.Namespace) 
     if required == 0:
         return
     reserve = max(10 * 1024 * 1024, required // 100)
-    free = shutil.disk_usage(args.dst_root).free
+    free = shutil.disk_usage(settings.layout.root).free
     if required + reserve > free:
         raise ValueError(
             f"not enough destination space: need about {required + reserve:,} bytes, "
@@ -685,10 +737,10 @@ def new_counters() -> dict[str, int]:
     }
 
 
-def handle_existing_direct(source: Path, destination: Path, debug: bool,
-                           counters: dict[str, int]) -> None:
-    """Classify an existing destination for a byte-preserving copy."""
-    if destination.is_file() and file_hash(source) == file_hash(destination):
+def record_existing(source: Path, destination: Path, digest: str, debug: bool,
+                    counters: dict[str, int]) -> None:
+    """Count an existing destination as identical if it hashes to digest, else a conflict."""
+    if destination.is_file() and file_hash(destination) == digest:
         counters["identical"] += 1
         if debug:
             print(f"SKIP identical: {destination}")
@@ -699,23 +751,22 @@ def handle_existing_direct(source: Path, destination: Path, debug: bool,
 
 def handle_source(source: Path, state: ImportState) -> None:
     """Classify and copy or queue one source file."""
-    args = state.args
-    counters = state.counters
+    settings, plan, counters = state.settings, state.plan, state.counters
     counters["scanned"] += 1
-    extension = source.suffix[1:].lower()
-    if extension not in state.extensions:
+    extension = file_extension(source)
+    if extension not in plan.extensions:
         counters["unsupported"] += 1
-        if args.debug:
+        if settings.debug:
             print(f"SKIP unsupported: {source}")
         return
-    if state.newer_ns is not None and source.stat().st_mtime_ns <= state.newer_ns:
+    if plan.newer_ns is not None and source.stat().st_mtime_ns <= plan.newer_ns:
         counters["old"] += 1
-        if args.debug:
+        if settings.debug:
             print(f"SKIP old: {source}")
         return
 
-    destination = destination_for(source, args)
-    needs_metadata, basic_exif = metadata_requested(extension, args)
+    destination = destination_for(source, settings.layout)
+    needs_metadata, basic_exif = metadata_requested(extension, settings.metadata)
     try:
         if needs_metadata:
             temporary, source_digest = create_temporary_copy(source, destination)
@@ -723,45 +774,40 @@ def handle_source(source: Path, state: ImportState) -> None:
                 source, destination, temporary, basic_exif, source_digest
             ))
         elif destination.exists():
-            handle_existing_direct(source, destination, args.debug, counters)
+            record_existing(source, destination, file_hash(source), settings.debug, counters)
         else:
             print(f"COPY: {source} -> {destination}")
-            direct_copy(source, destination, args)
+            direct_copy(source, destination, settings.mode)
             counters["copied"] += 1
     except (OSError, shutil.Error) as error:
         counters["failed"] += 1
         print(f"ERROR: {source}: {error}", file=sys.stderr)
 
 
-def publish_metadata_copy(item: PendingMetadataCopy, args: argparse.Namespace,
+def publish_metadata_copy(item: PendingMetadataCopy, settings: Settings,
                           counters: dict[str, int]) -> None:
     """Compare or publish one successfully processed metadata candidate."""
     candidate_digest = file_hash(item.temporary)
     if item.destination.exists():
-        if item.destination.is_file() and candidate_digest == file_hash(item.destination):
-            counters["identical"] += 1
-            if args.debug:
-                print(f"SKIP identical: {item.destination}")
-        else:
-            counters["conflicts"] += 1
-            print(f"CONFLICT: {item.source} -> {item.destination}", file=sys.stderr)
+        record_existing(item.source, item.destination, candidate_digest, settings.debug,
+                        counters)
         return
 
-    publish_temporary(item.temporary, item.destination, args)
+    publish_temporary(item.temporary, item.destination, settings.mode)
     counters["copied"] += 1
     if item.source_digest != candidate_digest:
         counters["metadata_changed"] += 1
     print(f"COPY: {item.source} -> {item.destination} (metadata processed)")
 
 
-def finish_metadata_copies(pending: list[PendingMetadataCopy], args: argparse.Namespace,
+def finish_metadata_copies(pending: list[PendingMetadataCopy], settings: Settings,
                            counters: dict[str, int]) -> None:
     """Process, publish, and clean up all temporary metadata copies."""
     if not pending:
         return
     try:
         try:
-            ready, failures = process_metadata(pending, args)
+            ready, failures = process_metadata(pending, settings)
         except (OSError, subprocess.CalledProcessError, ValueError) as error:
             counters["failed"] += len(pending)
             print(f"ERROR: metadata processing failed: {error}", file=sys.stderr)
@@ -771,7 +817,7 @@ def finish_metadata_copies(pending: list[PendingMetadataCopy], args: argparse.Na
             print(f"ERROR: {item.source}: {reason}", file=sys.stderr)
         for item in ready:
             try:
-                publish_metadata_copy(item, args, counters)
+                publish_metadata_copy(item, settings, counters)
             except OSError as error:
                 counters["failed"] += 1
                 print(f"ERROR: {item.source}: {error}", file=sys.stderr)
@@ -785,19 +831,19 @@ def cleanup_temporaries(pending: list[PendingMetadataCopy]) -> None:
         item.temporary.unlink(missing_ok=True)
 
 
-def import_photos(args: argparse.Namespace, plan: Plan) -> dict[str, int]:
+def import_photos(settings: Settings, plan: Plan) -> dict[str, int]:
     """Copy and process eligible photos, returning operation counters."""
     counters = new_counters()
     pending: list[PendingMetadataCopy] = []
-    state = ImportState(args, plan.extensions, plan.newer_ns, pending, counters)
+    state = ImportState(settings, plan, pending, counters)
 
     try:
         for source in plan.files:
             handle_source(source, state)
             if len(pending) >= METADATA_BATCH_SIZE:
-                finish_metadata_copies(pending, args, counters)
+                finish_metadata_copies(pending, settings, counters)
                 pending.clear()
-        finish_metadata_copies(pending, args, counters)
+        finish_metadata_copies(pending, settings, counters)
     finally:
         # Covers an interrupt or unexpected error while copies are still queued.
         cleanup_temporaries(pending)
@@ -805,47 +851,45 @@ def import_photos(args: argparse.Namespace, plan: Plan) -> dict[str, int]:
     return counters
 
 
-def prepare(args: argparse.Namespace) -> Plan:
+def prepare(args: argparse.Namespace) -> tuple[Settings, Plan]:
     """Resolve defaults and validate everything before writing anything."""
     config = load_config(args.config)
-    apply_config_defaults(args, config)
-    resolve_source(args, config)
-    resolve_destination(args, config)
-    validate_destination(args)
+    layout = resolve_layout(args, config)
+    validate_destination(layout, args.require_dst_mount)
     extensions = load_extensions()
-    newer_ns, newer_reason = resolve_newer(args)
-    files = source_files(args)
-    validate_photo_dates(
-        [source for source in files if source.suffix[1:].lower() in extensions], args
-    )
+    newer_ns, newer_reason = resolve_newer(args, layout.card)
+    files = source_files(layout)
+    if layout.card and not args.allow_old_dates:
+        validate_photo_dates([source for source in files if file_extension(source) in extensions])
     selected = [path for path in files if is_selected(path, extensions, newer_ns)]
-    targets = [(source, destination_for(source, args)) for source in selected]
-    resolve_gpx(args, config, {file_date(source) for source in selected})
-    validate_metadata_options(args)
+    targets = [(source, destination_for(source, layout)) for source in selected]
+    metadata = resolve_metadata(args, config, {file_date(source) for source in selected})
+    settings = Settings(layout, metadata, None if args.preserve_mode else args.mode, args.debug)
     validate_target_dirs(targets)
-    preflight_space(targets, args)
+    preflight_space(targets, settings)
     newest_ns = max((source.stat().st_mtime_ns for source in selected), default=None)
-    return Plan(extensions, files, targets, newer_ns, newer_reason, newest_ns)
+    return settings, Plan(extensions, files, targets, newer_ns, newer_reason, newest_ns)
 
 
-def print_plan(args: argparse.Namespace, plan: Plan) -> None:
+def print_plan(settings: Settings, plan: Plan) -> None:
     """Show the resolved settings, so inferred defaults are visible."""
-    if args.card:
-        folders = ", ".join(f"DCIM/{folder.name}" for folder in args.srcdirs)
-        print(f"SOURCE: {args.card} ({folders or 'no DCIM folders'})")
+    layout, metadata = settings.layout, settings.metadata
+    if layout.card:
+        folders = ", ".join(f"DCIM/{folder.name}" for folder in layout.folders)
+        print(f"SOURCE: {layout.card} ({folders or 'no DCIM folders'})")
     else:
-        print(f"SOURCE: {args.srcdir}")
+        print(f"SOURCE: {layout.srcdir}")
     if plan.newer_ns is not None:
         print(f"NEWER: {format_ns(plan.newer_ns)} ({plan.newer_reason})")
     directories = Counter(destination.parent for _, destination in plan.targets)
     for directory, count in sorted(directories.items()):
         print(f"DEST: {directory} ({count} files)")
     if not directories:
-        print(f"DEST: {args.dst_template} (no files)")
-    if args.gpx:
-        print("GPX: " + ", ".join(path.name for path in args.gpx))
+        print(f"DEST: {layout.template} (no files)")
+    if metadata.gpx:
+        print("GPX: " + ", ".join(path.name for path in metadata.gpx))
     tags = [f"{name}={value}" for name, value in
-            (("copyright", args.exif_copr), ("lens", args.exif_lens)) if value]
+            (("copyright", metadata.copyright), ("lens", metadata.lens)) if value]
     if tags:
         print("EXIF: " + " ".join(tags))
 
@@ -878,15 +922,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        plan = prepare(args)
+        settings, plan = prepare(args)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         parser.error(str(error))
 
-    print_plan(args, plan)
+    print_plan(settings, plan)
     if args.dry_run:
         return dry_run(plan)
     start = timer()
-    counters = import_photos(args, plan)
+    counters = import_photos(settings, plan)
     elapsed = timer() - start
     print(
         "SUMMARY: "
@@ -894,8 +938,8 @@ def main(argv: list[str] | None = None) -> int:
         + f" time={elapsed:.2f}s"
     )
     clean = not counters["conflicts"] and not counters["failed"]
-    if args.card:
-        remember_import(args.card, plan, clean)
+    if settings.layout.card:
+        remember_import(settings.layout.card, plan, clean)
     return 0 if clean else 1
 
 
