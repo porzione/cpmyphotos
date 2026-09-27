@@ -20,8 +20,8 @@ jobs:
         sudo apt-get install -y libimage-exiftool-perl
     - name: Analysing the code with pylint
       run: |
-        uv run --with pylint --with pytest --with dateparser \
+        uv run --with pylint --with pytest --with dateparser --with pyyaml \
           pylint --rcfile .pylintrc $(git ls-files '*.py')
     - name: Tests
       run: |
-        uv run --with pytest --with dateparser pytest -q
+        uv run --with pytest --with dateparser --with pyyaml pytest -q

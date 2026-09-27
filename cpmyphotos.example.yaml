@@ -1,0 +1,21 @@
+# Copy to ~/.config/cpmyphotos.yaml ($XDG_CONFIG_HOME). Every key is optional;
+# command-line options override it.
+
+# EXIF tags for JPEG/TIFF/PNG/WebP; -C '' / -L '' turn them off for one run.
+copyright: MYNAME
+# lens: 7Artisans 35mm f/0.95
+
+# Destination. {place} is the command's argument (cpmyphotos Cyprus), {year} is each
+# photo's year (from its mtime). The part before {year} must exist; the rest is created.
+archive: /home/ftp/images/{year}/{place}/MYNAME
+
+# Where to look for the mounted card (a dir with DCIM); default /run/media/$USER and
+# /media/$USER. Exactly one card must be mounted, otherwise pass -s.
+# card_root: /run/media/myname
+
+# GPX tracks for geotagging, chosen by photo date plus a day either side.
+gpx_dir: ~/SyncPhone/gpslog
+# gpx_name: "%Y%m%d.gpx"
+
+# Camera clock timezone for GPX matching; Z means the camera is set to UTC.
+# tz: Z

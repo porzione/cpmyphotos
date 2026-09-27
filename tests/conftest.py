@@ -36,6 +36,13 @@ def require_exiftool() -> None:
         pytest.skip("exiftool is not installed")
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the user's real config and card state out of every test."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
 @pytest.fixture
 def camera_source(tmp_path: Path) -> Path:
     """Create an isolated source containing the UTC-camera JPEG."""

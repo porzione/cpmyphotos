@@ -13,6 +13,9 @@ lens EXIF tags and geotagging from GPX tracks.
   and temporary files are removed on every exit, including Ctrl-C.
 - **Geotagging** from one or more GPX tracks via ExifTool, with camera timezone and clock
   correction, and an optional hard failure for photos without a track match.
+- **Short everyday command.** With a small YAML config, `cpmyphotos Cyprus` finds the mounted
+  card, copies what is new since the last import from that card into
+  `.../{year}/Cyprus/...`, adds your copyright and geotags from the GPX logs of those days.
 - Filters by modification date (`-n '1 day ago'`), recurses with `-r` keeping the card's
   directory layout, checks free space before copying, and works on destinations without hard
   links (exFAT, FAT32).
@@ -31,36 +34,75 @@ Install by linking the script into your `PATH`; `ext.json` is found next to the 
 ln -s "$PWD/cpmyphotos.py" ~/bin/cpmyphotos
 ```
 
+## Configuration
+
+Copy [`cpmyphotos.example.yaml`](cpmyphotos.example.yaml) to `~/.config/cpmyphotos.yaml`
+(`$XDG_CONFIG_HOME`). All keys are optional and command-line options override them:
+
+```yaml
+copyright: MYNAME
+archive: /home/ftp/images/{year}/{place}/MYNAME
+gpx_dir: ~/SyncPhone/gpslog
+```
+
+With it, the everyday import is:
+
+```sh
+cpmyphotos -N Cyprus   # dry run: show the card, dates, destination and tracks
+cpmyphotos Cyprus
+```
+
+- **Card.** Without `-s`, the single mounted dir under `card_root` (default
+  `/run/media/$USER` and `/media/$USER`) that contains `DCIM` is used, and it must be a mount
+  point. All its `DCIM/*` folders (`109_PANA`, `100OLYMP`, ...) are copied flat into the
+  destination. `-s CARD_ROOT` does the same for a chosen card; `-s` on any other dir copies
+  that dir, and `-r` copies a tree as it is.
+- **Since the last import.** For a card, only files newer than the newest file imported from
+  it last time are taken. This is remembered per card mount name in
+  `~/.local/state/cpmyphotos/cards.json` and updated only after a run without conflicts or
+  failures. The first import from a card needs `--all` (or `-n DATE`).
+- **Destination.** `{place}` is the command's argument and `{year}` the year of each photo, so a
+  trip over New Year is split correctly. The part before `{year}` must exist. `-d` still
+  works and may use the same placeholders.
+- **GPX.** With `gpx_dir`, the tracks named `gpx_name` (default `%Y%m%d.gpx`) for each photo
+  date and a day either side are used, together with any `-g`. `--no-gps` turns it off.
+
 ## Usage
 
 ```sh
-cpmyphotos -s SRCDIR -d DSTDIR [-r] [-n DATE] [-g GPX]... [--tz OFFSET] [--geosync SHIFT]
-           [--require-gps] [-C COPYRIGHT] [-L LENS] [--mode OCTAL | --preserve-mode]
-           [--require-src-mount] [--require-dst-mount] [-D]
+cpmyphotos [PLACE] [-s SRCDIR] [-d DSTDIR] [-N] [-r] [-n DATE | --all] [-g GPX... | --no-gps]
+           [--tz OFFSET] [--geosync SHIFT] [--require-gps] [-C COPYRIGHT] [-L LENS]
+           [--mode OCTAL | --preserve-mode] [--require-src-mount] [--require-dst-mount]
+           [--config FILE] [-D]
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `-s`, `-d` | source (card) and destination (archive) directories; both must exist |
+| `PLACE` | value for `{place}` in the destination |
+| `-s`, `-d` | source (card) and destination (archive); default: detected card, `archive` |
+| `-N`, `--dry-run` | run all checks and list what would be copied, write nothing |
 | `-r` | recurse into the source and keep its directory structure |
 | `-n DATE` | only files modified after DATE (anything `dateparser` understands) |
+| `--all` | the whole card, ignoring its last import |
 | `-g GPX` | geotag from a GPX track; repeatable |
+| `--no-gps` | no geotagging, even with `gpx_dir` in the config |
 | `--tz OFFSET` | camera clock timezone, `Z` (default, UTC) or `+HH:MM` |
 | `--geosync SHIFT` | camera/GPS clock correction, e.g. `+00:00:25` |
 | `--require-gps` | a photo without a track match is an error instead of a warning |
-| `-C`, `-L` | EXIF copyright and lens model (JPEG, TIFF, PNG, WebP only) |
+| `-C`, `-L` | EXIF copyright and lens model (JPEG, TIFF, PNG, WebP only); `''` for none |
 | `--mode`, `--preserve-mode` | destination file mode (default 0644), or keep the source's |
 | `--require-src-mount`, `--require-dst-mount` | refuse to run unless the dir is a mount point |
+| `--config FILE` | config file instead of `~/.config/cpmyphotos.yaml` |
 | `-D` | show skipped files and ExifTool commands |
 
-It prints `COPY`, `CONFLICT`, `WARNING` and `ERROR` lines and a final
+It first prints the resolved `SOURCE`, `NEWER`, `DEST`, `GPX` and `EXIF`, then `COPY`, `CONFLICT`, `WARNING` and `ERROR` lines and a final
 `SUMMARY: scanned= copied= identical= conflicts= unsupported= old= failed= metadata_changed= time=`.
 The exit code is 1 if there were conflicts or failures, 2 for usage errors (bad arguments,
 missing directories, not enough space).
 
 ### Examples
 
-Yesterday's photos with a manual lens and today's GPS log, camera clock at +02:00:
+Without a config, yesterday's photos with a manual lens and today's GPS log, camera clock at +02:00:
 
 ```sh
 cpmyphotos -C 'MYNAME' -L '7Artisans 35mm f/0.95' \
@@ -87,8 +129,8 @@ cpmyphotos -s /run/media/${USER}/LUMIX1/DCIM/109_PANA -d /mnt/photos \
 The tests use pytest, a tiny real camera JPEG and a synthetic GPX track, and need `exiftool`:
 
 ```sh
-uv run --with pytest --with dateparser pytest -q
+uv run --with pytest --with dateparser --with pyyaml pytest -q
 ```
 
 `tests/test_real_gpx.py` is an opt-in smoke test against your newest real track:
-`REAL_GPX_DIR=~/path/to/gpslogger uv run --with pytest --with dateparser pytest -q -m real_gpx`.
+`REAL_GPX_DIR=~/path/to/gpslogger uv run --with pytest --with dateparser --with pyyaml pytest -q -m real_gpx`.
