@@ -2,7 +2,8 @@
 
 import os
 import shutil
-from datetime import datetime
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,8 @@ def add_photo(folder: Path, name: str, moment: datetime) -> Path:
 @pytest.fixture(name="setup")
 def setup_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A mounted card under a card root, an archive, and a config pointing at both."""
+    now = datetime(2026, 9, 27, tzinfo=timezone.utc)
+    monkeypatch.setattr(cpmyphotos.time, "time_ns", lambda: int(now.timestamp() * 1e9))
     media = tmp_path / "media"
     card = media / "LUMIX1"
     add_photo(card / "DCIM" / "109_PANA", "P1090001.JPG", local(2026, 4, 12, 12, 0))
@@ -109,6 +112,41 @@ def test_card_remembers_last_import(setup, capsys):
     assert "copied=1 identical=0" in out
     assert "old=1" in out
     assert "IMPORTED: LUMIX1 up to 2026-04-13 09:00:00" in out
+
+
+def test_old_card_date_needs_override_for_gps_recovery(setup, capsys):
+    photo = setup["card"] / "DCIM" / "109_PANA" / "P1090001.JPG"
+    subprocess.run(
+        ["exiftool", "-q", "-overwrite_original", "-DateTimeOriginal=2010:01:01 00:00:00",
+         str(photo)], check=True
+    )
+    set_mtime(photo, local(2010, 1, 1))
+    recovery = ("Cyprus", "--all", "-g", str(UTC_TRACK),
+                "--geosync", "+5945 05:23:39")
+
+    status, _, err = run_main(capsys, *recovery)
+    assert status == 2
+    assert "--allow-old-dates" in err
+    assert not list(setup["archive"].iterdir())
+
+    status, _, err = run_main(capsys, *recovery, "--allow-old-dates")
+    assert status == 0, err
+    target = setup["archive"] / "2010" / "Cyprus" / "Oleg" / photo.name
+    assert read_metadata(target, "GPSLatitude")["GPSLatitude"] == pytest.approx(11.0)
+
+
+def test_reset_date_is_detected_before_last_import_filter(setup, capsys):
+    assert run_main(capsys, "Cyprus", "--all")[0] == 0
+    add_photo(setup["card"] / "DCIM" / "109_PANA", "P1090002.JPG", local(2010, 1, 1))
+
+    status, _, err = run_main(capsys, "Cyprus")
+    assert status == 2
+    assert "P1090002.JPG" in err
+    assert "--allow-old-dates" in err
+
+    status, out, err = run_main(capsys, "Cyprus", "--allow-old-dates", "-N")
+    assert status == 0, err
+    assert "selected=0" in out
 
 
 def test_conflict_does_not_advance_last_import(setup, capsys):

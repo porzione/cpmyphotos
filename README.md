@@ -70,7 +70,8 @@ cpmyphotos Cyprus
 ## Usage
 
 ```sh
-cpmyphotos [PLACE] [-s SRCDIR] [-d DSTDIR] [-N] [-r] [-n DATE | --all] [-g GPX... | --no-gps]
+cpmyphotos [PLACE] [-s SRCDIR] [-d DSTDIR] [-N] [-r] [-n DATE | --all] [--allow-old-dates]
+           [-g GPX... | --no-gps]
            [--tz OFFSET] [--geosync SHIFT] [--require-gps] [-C COPYRIGHT] [-L LENS]
            [--mode OCTAL | --preserve-mode] [--require-src-mount] [--require-dst-mount]
            [--config FILE] [-D]
@@ -84,10 +85,11 @@ cpmyphotos [PLACE] [-s SRCDIR] [-d DSTDIR] [-N] [-r] [-n DATE | --all] [-g GPX..
 | `-r` | recurse into the source and keep its directory structure |
 | `-n DATE` | only files modified after DATE (anything `dateparser` understands) |
 | `--all` | the whole card, ignoring its last import |
+| `--allow-old-dates` | allow card photos with mtimes over a year old (for old trips or a reset camera clock) |
 | `-g GPX` | geotag from a GPX track; repeatable |
 | `--no-gps` | no geotagging, even with `gpx_dir` in the config |
 | `--tz OFFSET` | camera clock timezone, `Z` (default, UTC) or `+HH:MM` |
-| `--geosync SHIFT` | camera/GPS clock correction, e.g. `+00:00:25` |
+| `--geosync SHIFT` | camera/GPS clock correction, e.g. `+00:00:25` or `+5945 05:23:39` for a day-sized error |
 | `--require-gps` | a photo without a track match is an error instead of a warning |
 | `-C`, `-L` | EXIF copyright and lens model (JPEG, TIFF, PNG, WebP only); `''` for none |
 | `--mode`, `--preserve-mode` | destination file mode (default 0644), or keep the source's |
@@ -123,6 +125,21 @@ Refuse to run if the card or the archive disk is not mounted, so nothing lands o
 cpmyphotos -s /run/media/${USER}/LUMIX1/DCIM/109_PANA -d /mnt/photos \
   --require-src-mount --require-dst-mount
 ```
+
+If the camera clock reset, card files over a year old stop the import. After finding the
+correct time difference, use `--allow-old-dates` to continue, `--all` (or an explicit `-n`)
+to bypass the saved mtime threshold, and `-g` because automatic track selection uses the
+incorrect file date. For example, if GPS time is 5945 days, 5 hours, 23 minutes and 39 seconds
+ahead of the camera clock:
+
+```sh
+cpmyphotos Cyprus --all --allow-old-dates -g correct-day.gpx \
+  --geosync '+5945 05:23:39' --require-gps
+```
+
+This corrects GPS matching only. The copied image's capture date and mtime, and therefore
+its `{year}` archive directory, still reflect the camera's incorrect date. Old photos
+already left on a card also require `--allow-old-dates` on later imports.
 
 ## Tests
 

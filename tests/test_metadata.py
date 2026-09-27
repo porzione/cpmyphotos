@@ -44,6 +44,7 @@ def test_basic_metadata_preserves_camera_fields(camera_source, tmp_path: Path, r
     )
 
     assert result.returncode == 0, result.stderr
+    assert "metadata_changed=1" in result.stdout
     assert metadata["DateTimeOriginal"] == "2026:04:12 05:23:39"
     assert metadata["OffsetTimeOriginal"] == "+02:00"
     assert metadata["Make"] == "Panasonic"

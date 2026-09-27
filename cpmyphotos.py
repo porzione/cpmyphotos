@@ -48,6 +48,7 @@ class PendingMetadataCopy:
     destination: Path
     temporary: Path
     write_basic_exif: bool
+    source_digest: str
 
 
 @dataclass
@@ -108,6 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "(default for a card: newer than its last import)")
     since.add_argument("--all", action="store_true",
                        help="Copy the whole card, ignoring its last import")
+    parser.add_argument("--allow-old-dates", action="store_true",
+                        help="Allow card photos dated over a year ago")
     parser.add_argument("-r", "--recursive", action="store_true",
                         help="Recurse and preserve the source directory structure")
     gps = parser.add_mutually_exclusive_group()
@@ -392,6 +395,20 @@ def is_selected(source: Path, extensions: set[str], newer_ns: int | None) -> boo
     return newer_ns is None or source.stat().st_mtime_ns > newer_ns
 
 
+def validate_photo_dates(sources: list[Path], args: argparse.Namespace) -> None:
+    """Catch implausibly old card timestamps before they drive the import."""
+    if not args.card or args.allow_old_dates:
+        return
+    cutoff_ns = time.time_ns() - 365 * 24 * 60 * 60 * 1_000_000_000
+    old = [source for source in sources if source.stat().st_mtime_ns < cutoff_ns]
+    if old:
+        raise ValueError(
+            f"{len(old)} card photo(s) are over a year old "
+            f"(first: {old[0]}). If these dates are intentional, pass --allow-old-dates; "
+            "if the camera clock reset, use --all or -n plus -g and --geosync to match GPS"
+        )
+
+
 def file_date(path: Path) -> date:
     """Return the local modification date, which cameras set to the capture time."""
     return local_time(path.stat().st_mtime).date()
@@ -464,7 +481,7 @@ def apply_mode(path: Path, args: argparse.Namespace) -> None:
         path.chmod(args.mode)
 
 
-def create_temporary_copy(source: Path, destination: Path) -> Path:
+def create_temporary_copy(source: Path, destination: Path) -> tuple[Path, str]:
     """Copy source to a same-directory temporary path for metadata processing."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_stat = source.stat()
@@ -475,13 +492,14 @@ def create_temporary_copy(source: Path, destination: Path) -> Path:
     temporary = Path(temp_name)
     try:
         shutil.copy2(source, temporary)
-        if file_hash(source) != file_hash(temporary):
+        source_digest = file_hash(source)
+        if source_digest != file_hash(temporary):
             raise OSError(f"verification failed while copying {source}")
         current_stat = source.stat()
         if (current_stat.st_size, current_stat.st_mtime_ns) != (
                 source_stat.st_size, source_stat.st_mtime_ns):
             raise OSError(f"source changed while copying: {source}")
-        return temporary
+        return temporary, source_digest
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -700,9 +718,9 @@ def handle_source(source: Path, state: ImportState) -> None:
     needs_metadata, basic_exif = metadata_requested(extension, args)
     try:
         if needs_metadata:
-            temporary = create_temporary_copy(source, destination)
+            temporary, source_digest = create_temporary_copy(source, destination)
             state.pending.append(PendingMetadataCopy(
-                source, destination, temporary, basic_exif
+                source, destination, temporary, basic_exif, source_digest
             ))
         elif destination.exists():
             handle_existing_direct(source, destination, args.debug, counters)
@@ -718,7 +736,6 @@ def handle_source(source: Path, state: ImportState) -> None:
 def publish_metadata_copy(item: PendingMetadataCopy, args: argparse.Namespace,
                           counters: dict[str, int]) -> None:
     """Compare or publish one successfully processed metadata candidate."""
-    source_digest = file_hash(item.source)
     candidate_digest = file_hash(item.temporary)
     if item.destination.exists():
         if item.destination.is_file() and candidate_digest == file_hash(item.destination):
@@ -732,7 +749,7 @@ def publish_metadata_copy(item: PendingMetadataCopy, args: argparse.Namespace,
 
     publish_temporary(item.temporary, item.destination, args)
     counters["copied"] += 1
-    if source_digest != candidate_digest:
+    if item.source_digest != candidate_digest:
         counters["metadata_changed"] += 1
     print(f"COPY: {item.source} -> {item.destination} (metadata processed)")
 
@@ -798,6 +815,9 @@ def prepare(args: argparse.Namespace) -> Plan:
     extensions = load_extensions()
     newer_ns, newer_reason = resolve_newer(args)
     files = source_files(args)
+    validate_photo_dates(
+        [source for source in files if source.suffix[1:].lower() in extensions], args
+    )
     selected = [path for path in files if is_selected(path, extensions, newer_ns)]
     targets = [(source, destination_for(source, args)) for source in selected]
     resolve_gpx(args, config, {file_date(source) for source in selected})
